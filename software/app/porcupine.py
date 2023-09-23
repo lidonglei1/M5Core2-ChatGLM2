@@ -6,7 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from setting import *
 from common_utils import *
 
-logger = logging.getLogger("sampleLogger")
+logger = logging.getLogger("root")
 
 
 class PorcupinePredictor:

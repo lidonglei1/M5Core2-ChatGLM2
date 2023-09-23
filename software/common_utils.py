@@ -35,4 +35,10 @@ def bytes_to_int16_list_np(byte_data) -> np.ndarray:
 
 
 if __name__ == '__main__':
+    # unit-test: filename generation
     print("Auto-generated timestamp based filename: {}".format(generate_filename("wav")))
+
+    # unit-test: bytes to List[int]
+    test_bytes = b'this is an testing bytes-array'
+    print(bytes_to_int16_list(test_bytes))
+    print(bytes_to_int16_list_np(test_bytes).tolist() == bytes_to_int16_list(test_bytes))

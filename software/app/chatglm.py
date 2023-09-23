@@ -1,5 +1,7 @@
 import logging
 import time
+import traceback
+
 import torch
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, APIRouter, HTTPException
@@ -8,7 +10,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from transformers import AutoTokenizer, AutoModel
 from sse_starlette.sse import ServerSentEvent, EventSourceResponse
 
-logger = logging.getLogger("sampleLogger")
+logger = logging.getLogger("root")
 
 # 创建一个路由器实例
 router = APIRouter()
@@ -85,6 +87,9 @@ async def list_models():
 
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def create_chat_completion(request: ChatCompletionRequest):
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Receive request data: {}".format(request))
+
     global model, tokenizer
 
     if request.messages[-1].role != "user":
@@ -153,7 +158,9 @@ async def predict(query: str, history: List[List[str]], model_id: str):
     yield '[DONE]'
 
 
-if __name__ == "__main__":
+def initialize_model():
+    global model, tokenizer
+
     # tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm2-6b", trust_remote_code=True)
     # model = AutoModel.from_pretrained("THUDM/chatglm2-6b", trust_remote_code=True).cuda()
     tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm2-6b-int4", trust_remote_code=True)
@@ -163,3 +170,8 @@ if __name__ == "__main__":
     # from utils import load_model_on_gpus
     # model = load_model_on_gpus("THUDM/chatglm2-6b", num_gpus=2)
     model.eval()
+
+
+model = None
+tokenizers = None
+initialize_model()
