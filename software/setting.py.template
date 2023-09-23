@@ -1,0 +1,15 @@
+"""Modify setting.py.template to setting.py, and replace the variables with yours."""
+
+# porcupine
+keywords_list = ["小智"]
+access_key = "put your access-key here"
+keyword_paths_list = ['E:/BlogResources/Picovoice Porcupine/小智_zh_windows_v2_2_0/小智_zh_windows_v2_2_0.ppn']
+model_path = 'E:/BlogResources/Picovoice Porcupine/小智_zh_windows_v2_2_0/porcupine_params_zh.pv'
+
+# wave
+enable_recording = True
+
+# audio format
+sample_rate = 16000
+num_channels = 1
+sample_width = 16
