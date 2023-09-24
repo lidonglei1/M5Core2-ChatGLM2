@@ -1,4 +1,4 @@
-import logging.config
+import logging
 from traceback import print_exception
 
 import uvicorn
@@ -15,9 +15,9 @@ Swagger UI：http://localhost:8000/docs
 ReDoc：http://localhost:8000/redoc
 """
 
-logging.config.fileConfig('logging_config.ini')
+# logging.config.fileConfig('logging_config.ini')
 
-app = FastAPI(lifespan=chatglm.lifespan)
+app = FastAPI(lifespan=chatglm.lifespan, debug=True)
 
 
 async def catch_exceptions_middleware(request: Request, call_next):
@@ -29,19 +29,7 @@ async def catch_exceptions_middleware(request: Request, call_next):
         return Response("Internal server error", status_code=500)
 
 
-async def catch_websocket_exceptions(scope, receive, send):
-    try:
-        # 处理 WebSocket 连接
-        await app(scope, receive, send)
-    except Exception as e:
-        # 处理异常
-        # 记录日志或其他操作
-        print(f"WebSocket Exception: {str(e)}")
-
-
-
 app.middleware('http')(catch_exceptions_middleware)
-
 
 
 app.add_middleware(
@@ -58,4 +46,4 @@ app.include_router(chatglm.router)
 # Porcupine Websockets Server
 app.include_router(porcupine.router)
 
-uvicorn.run(app, host='0.0.0.0', port=8000, workers=1, log_level=logging.DEBUG, reload=True)
+uvicorn.run(app, host='0.0.0.0', port=8000, workers=1, log_level=logging.INFO)

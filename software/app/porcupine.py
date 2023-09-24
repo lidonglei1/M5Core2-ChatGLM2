@@ -1,12 +1,11 @@
 import logging
 import pvporcupine
-from typing import List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from setting import *
 from common_utils import *
 
-logger = logging.getLogger("root")
+logger = logging.getLogger(__name__)
 
 
 class PorcupinePredictor:
@@ -22,17 +21,12 @@ class PorcupinePredictor:
         The incoming audio needs to have a sample rate equal to `.sample_rate` and be 16-bit
         linearly-encoded. Porcupine operates on single-channel audio.
         """
-        print("1")
         # returns -1 if no keyword is detected
-        print(self.porcupine.frame_length, len(pcm))
         keyword_index = self.porcupine.process(pcm)
-        print("2")
         return keyword_index
 
     def predict_detail(self, pcm):
         keyword_index = self.predict(pcm)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Porcupine predict result index: {}".format(keyword_index))
         logger.debug("Porcupine predict result index: {}".format(keyword_index))
 
         if keyword_index >= 0:
@@ -64,18 +58,17 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def process_audio_bytes(self, pcm_bytes: bytes, websocket: WebSocket):
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Receive audio bytes from websocket.")
+        logger.info("Receive audio bytes from websocket.")
 
         # if enable_recording:
         #     wav_filename = generate_filename()
         #     save_as_wav(pcm_bytes, wav_filename, sample_rate, num_channels, sample_width)
         #     logger.debug("Save pcm audio to {}".format(wav_filename))
-
         pcm_list = bytes_to_int16_list_np(pcm_bytes).tolist()
-        print(pcm_list[:10])
         result = self.porcupine.predict_detail(pcm_list)
         if result is not None:
+            logger.info("Detected: {}".format(result))
+            print("Detected: {}".format(result))
             await websocket.send_text(result)
 
     async def broadcast(self, message: str):

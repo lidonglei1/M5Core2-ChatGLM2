@@ -1,17 +1,15 @@
 import logging
 import time
-import traceback
 
 import torch
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi.logger import logger
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional, Union
 from transformers import AutoTokenizer, AutoModel
 from sse_starlette.sse import ServerSentEvent, EventSourceResponse
 from setting import *
-
-logger = logging.getLogger("root")
 
 # 创建一个路由器实例
 router = APIRouter()
