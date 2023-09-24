@@ -1,5 +1,12 @@
+**/.idea
+**/__pycache__/
+**/*.log
+**/setting.py
+
 software/venv/
 
 /firmware/M5Core2-ChatGLM2/lib/
 /firmware/M5Core2-ChatGLM2/.pio/
 /firmware/M5Core2-ChatGLM2/.vscode
+
+**/notes.txt

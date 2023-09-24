@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional, Union
 from transformers import AutoTokenizer, AutoModel
 from sse_starlette.sse import ServerSentEvent, EventSourceResponse
+from setting import *
 
 logger = logging.getLogger("root")
 
@@ -174,4 +175,4 @@ def initialize_model():
 
 model = None
 tokenizers = None
-initialize_model()
+# initialize_model()

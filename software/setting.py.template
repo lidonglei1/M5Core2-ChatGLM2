@@ -13,3 +13,6 @@ enable_recording = True
 sample_rate = 16000
 num_channels = 1
 sample_width = 16
+
+# model selection
+CHATGLM2_6B_IN4_PATH = ""

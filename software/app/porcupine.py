@@ -22,13 +22,19 @@ class PorcupinePredictor:
         The incoming audio needs to have a sample rate equal to `.sample_rate` and be 16-bit
         linearly-encoded. Porcupine operates on single-channel audio.
         """
-
+        print("1")
         # returns -1 if no keyword is detected
+        print(self.porcupine.frame_length, len(pcm))
         keyword_index = self.porcupine.process(pcm)
+        print("2")
         return keyword_index
 
     def predict_detail(self, pcm):
         keyword_index = self.predict(pcm)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Porcupine predict result index: {}".format(keyword_index))
+        logger.debug("Porcupine predict result index: {}".format(keyword_index))
+
         if keyword_index >= 0:
             keyword = keywords_list[keyword_index]
         else:
@@ -61,10 +67,13 @@ class ConnectionManager:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Receive audio bytes from websocket.")
 
-        if enable_recording:
-            save_as_wav(pcm_bytes, generate_filename(), sample_rate, num_channels, sample_width)
+        # if enable_recording:
+        #     wav_filename = generate_filename()
+        #     save_as_wav(pcm_bytes, wav_filename, sample_rate, num_channels, sample_width)
+        #     logger.debug("Save pcm audio to {}".format(wav_filename))
 
         pcm_list = bytes_to_int16_list_np(pcm_bytes).tolist()
+        print(pcm_list[:10])
         result = self.porcupine.predict_detail(pcm_list)
         if result is not None:
             await websocket.send_text(result)
@@ -79,12 +88,14 @@ manager = ConnectionManager()
 manager.porcupine = PorcupinePredictor()
 
 
-@router.websocket("/ws")
+@router.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: int):
     await manager.connect(websocket)
+    logger.info("Establish a new connection, websocket client id is {}".format(client_id))
     try:
         while True:
             data = await websocket.receive_bytes()
             await manager.process_audio_bytes(data, websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        logger.info("Connection closed, client ID is {}".format(client_id))
