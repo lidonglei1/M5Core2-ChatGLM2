@@ -30,6 +30,10 @@ async def websocket_client():
                 await websocket.send(data)
                 print("发送音频数据:{} 长度:{}".format(data, len(data)))
 
+                # 接收服务器返回的数据
+                response = await websocket.recv()
+                print("接收到服务器返回的数据: {}".format(response))
+
             except websockets.ConnectionClosedOK:
                 break
 

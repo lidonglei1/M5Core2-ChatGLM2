@@ -15,11 +15,8 @@ def generate_filename(file_extension='wav'):
 def save_as_wav(audio_data, filename, sample_rate, num_channels, sample_width):
     with wave.open(filename, 'wb') as wav_file:
         wav_file.setnchannels(num_channels)
-        print("writing...")
-        #wav_file.setsampwidth(sample_width)
-        #print("writing...")
+        wav_file.setsampwidth(sample_width)
         wav_file.setframerate(sample_rate)
-        print("writing...")
         wav_file.writeframes(audio_data)
 
 

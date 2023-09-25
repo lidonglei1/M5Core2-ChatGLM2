@@ -8,11 +8,12 @@ model_path = 'E:/BlogResources/Picovoice Porcupine/小智_zh_windows_v2_2_0/porc
 
 # wave
 enable_recording = True
+total_frame_num = 60
 
 # audio format
 sample_rate = 16000
 num_channels = 1
-sample_width = 16
+sample_width = 2
 
 # model selection
 CHATGLM2_6B_IN4_PATH = ""

@@ -32,7 +32,7 @@ class PorcupinePredictor:
         if keyword_index >= 0:
             keyword = keywords_list[keyword_index]
         else:
-            keyword = None
+            keyword = "NONE"
         return keyword
 
 
@@ -40,6 +40,9 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self._porcupine: PorcupinePredictor = None
+
+        self.frame_cnt = 0
+        self.frame_bytes = bytes()
 
     @property
     def porcupine(self):
@@ -49,6 +52,17 @@ class ConnectionManager:
     def porcupine(self, predictor_instance):
         # 可以在 setter 方法中添加额外的逻辑
         self._porcupine = predictor_instance
+
+    def reset_frame_cnt(self):
+        self.frame_cnt = 0
+        self.frame_bytes = bytes()
+
+    def increment_frame_cnt(self, sub_bytes):
+        self.frame_cnt += 1
+        self.frame_bytes += sub_bytes
+
+    def check_frame_cnt(self):
+        return self.frame_cnt >= total_frame_num
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -60,16 +74,20 @@ class ConnectionManager:
     async def process_audio_bytes(self, pcm_bytes: bytes, websocket: WebSocket):
         logger.info("Receive audio bytes from websocket.")
 
-        # if enable_recording:
-        #     wav_filename = generate_filename()
-        #     save_as_wav(pcm_bytes, wav_filename, sample_rate, num_channels, sample_width)
-        #     logger.debug("Save pcm audio to {}".format(wav_filename))
+        if enable_recording and self.check_frame_cnt():
+            wav_filename = generate_filename()
+            save_as_wav(self.frame_bytes, wav_filename, sample_rate, num_channels, sample_width)
+            logger.debug("Save pcm audio to {}".format(wav_filename))
+
+            self.reset_frame_cnt()
+        else:
+            self.increment_frame_cnt(pcm_bytes)
+
         pcm_list = bytes_to_int16_list_np(pcm_bytes).tolist()
         result = self.porcupine.predict_detail(pcm_list)
-        if result is not None:
-            logger.info("Detected: {}".format(result))
-            print("Detected: {}".format(result))
-            await websocket.send_text(result)
+        logger.info("Detected: {}".format(result))
+        print("Detected: {}".format(result))
+        await websocket.send_text(result)
 
     async def broadcast(self, message: str):
         for connection in self.active_connections:
