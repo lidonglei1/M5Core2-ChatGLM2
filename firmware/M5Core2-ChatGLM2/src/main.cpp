@@ -5,6 +5,10 @@
 #include <nvs.h>
 #include <Avatar.h>
 #include <ESPAsyncWebServer.h>
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <WiFiClientSecure.h>
+#include <WebSocketsClient.h>
 #include <SPIFFS.h>
 
 #include <AudioOutput.h>
@@ -29,20 +33,26 @@ using namespace m5avatar;
 #define WIFI_SSID "LeeSophia"
 #define WIFI_PASS "xxxxxx"
 #define ARDUINO_M5STACK_Core2
+#define USE_SERIAL Serial1
 
 // constants
 const int MAX_TOKEN = 10;
 const int preallocateBufferSize = 50*1024;
 // set M5Speaker virtual channel (0-7)
 static constexpr uint8_t m5spk_virtual_channel = 0;
+static constexpr const size_t record_samplerate = 16000;
+static constexpr const size_t record_size = record_samplerate * 5;  // 16000() * 16/2(Bytes) *5(s) = 160(KB)
 
 // variables
+static int16_t *rec_data;
+
 std::deque<String> tokenHistory;
 uint8_t *preallocateBuffer;
 bool audioEndFlag;
 
-bool isReacting;
-bool isRandomBehaving;
+bool isTask3 = false;
+bool isReacting = false;
+bool isRandomBehaving = false;
 unsigned long lastInterfacingTime;
 
 // queue
@@ -53,6 +63,9 @@ SemaphoreHandle_t xSemaphore;
 Avatar avatar;
 ChatGLM chatglm;
 AsyncWebServer server(80);
+WebSocketsClient webSocket;
+AudioGeneratorMP3 *mp3;
+AudioFileSourceBuffer *buff = nullptr;
 static AudioOutputM5Speaker out(&M5.Speaker, m5spk_virtual_channel);
 
 // task handlers
@@ -71,13 +84,21 @@ void speechInteractionTask(void * parameter);
 void movementTask(void * parameter);
 void randomBehaviorTask(void * parameter);
 
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
+void hexdump(const void *mem, uint32_t len, uint8_t cols = 16);
+
 // Initialization Routine
 void setup() {
   setupM5Box();
   startWifi();
 
-  ESP_LOGI(TAG, "speech recognition start");
-  app_sr_start(false);
+  mp3 = new AudioGeneratorMP3();
+
+  rec_data = (typeof(rec_data))heap_caps_malloc(record_size * sizeof(int16_t), MALLOC_CAP_8BIT);  // TTS录音数据
+  memset(rec_data, 0 , record_size * sizeof(int16_t));
+
+  // ESP_LOGI(TAG, "speech recognition start");
+  // app_sr_start(false);
   
   // create task
   xTaskCreatePinnedToCore(displayTask, "DisplayTask",  10000,  NULL,  1, &DisplayTaskHandle, 1);
@@ -86,7 +107,7 @@ void setup() {
   xTaskCreatePinnedToCore(speechInteractionTask, "SpeechInteractionTask",  4000,  NULL,  1, &SpeechInteractionTaskHandle, 1);
   xTaskCreatePinnedToCore(movementTask, "MovementTask",  4000,  NULL,  1, &MovementTaskHandle, 1);
   xTaskCreatePinnedToCore(randomBehaviorTask, "RandomBehaviorTask",  4000,  NULL,  1, &RandomBehaviorTaskHandle, 1);
-  avatar.addTask(c, "lipSync");
+  avatar.addTask(lipSync, "lipSync");
 
   Serial.println("Finish Setuped.");
 }
@@ -141,20 +162,41 @@ void displayTask(void * parameter) {
 
 void sampleAudioTask(void * parameter) {
   while (true) {
-    
+    if (M5.Mic.isEnabled()) {
+      if (!isTask3) {
+        // record 1 sample and send
+        recordOneSample();
+        xQueueSend(queueSample, &sample16, 10);
+      }
+    }
   }
   vTaskDelete(SampleAudioTaskHandle);
 }
 
 void onlineWakeupTask(void * parameter) {
   while (true) {
-
+    if (!isTask3) {
+      xQueueReceive(queueSample, &element, portMAX_DELAY);
+      webSocket.send(element);
+    }
   }
   vTaskDelete(OnlineWakeupTaskHandle);
 }
 
 void speechInteractionTask(void * parameter) {
   while (true) {
+    // Waiting for notification from Online-Wake-Up task
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    isTask3 = true;
+
+    // do something
+
+
+    // perform tts
+    VoiceText_tts();
+
+    isTask3 = false;
+    xQueueReset(queueSample);
 
   }
   vTaskDelete(SpeechInteractionTaskHandle);
@@ -197,4 +239,62 @@ void lipSync(void *args)
     avatar->setRotation(gazeX * 5);
     delay(50);
   }
+}
+
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+
+	switch(type) {
+		case WStype_DISCONNECTED:
+			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			break;
+		case WStype_CONNECTED:
+			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+
+			// send message to server when Connected
+			webSocket.sendTXT("Connected");
+			break;
+		case WStype_TEXT:
+			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+      // wake up and start reacting
+      if (strcmp((char*)payload, "xiaozhi") == 0) {
+
+        xTaskNotifyGive(&SpeechInteractionTaskHandle);
+      }
+
+			// send message to server
+			// webSocket.sendTXT("message here");
+			break;
+		case WStype_BIN:
+			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			hexdump(payload, length);
+
+			// send data to server
+			// webSocket.sendBIN(payload, length);
+			break;
+		case WStype_ERROR:			
+		case WStype_FRAGMENT_TEXT_START:
+		case WStype_FRAGMENT_BIN_START:
+		case WStype_FRAGMENT:
+		case WStype_FRAGMENT_FIN:
+			break;
+	}
+}
+
+void hexdump(const void *mem, uint32_t len, uint8_t cols = 16) {
+	const uint8_t* src = (const uint8_t*) mem;
+	USE_SERIAL.printf("\n[HEXDUMP] Address: 0x%08X len: 0x%X (%d)", (ptrdiff_t)src, len, len);
+	for(uint32_t i = 0; i < len; i++) {
+		if(i % cols == 0) {
+			USE_SERIAL.printf("\n[0x%08X] 0x%08X: ", (ptrdiff_t)src, i);
+		}
+		USE_SERIAL.printf("%02X ", *src);
+		src++;
+	}
+	USE_SERIAL.printf("\n");
+}
+
+void VoiceText_tts(char *text,char *tts_parms) {
+    file = new AudioFileSourceVoiceTextStream( text, tts_parms);
+    buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
+    mp3->begin(buff, &out);
 }
