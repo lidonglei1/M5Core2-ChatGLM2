@@ -38,13 +38,18 @@ using namespace m5avatar;
 // constants
 const int MAX_TOKEN = 10;
 const int preallocateBufferSize = 50*1024;
+const char KEY_WORD[] = "xiaozhi";
 // set M5Speaker virtual channel (0-7)
 static constexpr uint8_t m5spk_virtual_channel = 0;
-static constexpr const size_t record_samplerate = 16000;
-static constexpr const size_t record_size = record_samplerate * 5;  // 16000() * 16/2(Bytes) *5(s) = 160(KB)
+static constexpr const size_t recordSampleRate = 16000;
+static constexpr const size_t record_size = recordSampleRate * 5;  // 16000() * 16/2(Bytes) *5(s) = 160(KB)
+
+const int queueSampleSize = recordSampleRate * 2;
 
 // variables
 static int16_t *rec_data;
+char subText[100] = "";
+char resultASRText[500] = "";  // 存储ASR结果字符串，最大长度为 500
 
 std::deque<String> tokenHistory;
 uint8_t *preallocateBuffer;
@@ -55,15 +60,23 @@ bool isReacting = false;
 bool isRandomBehaving = false;
 unsigned long lastInterfacingTime;
 
+struct timeval currentTime;
+struct timeval previousTime;
+
+m5::mic_config_t micCfg;
+
 // queue
 QueueHandle_t queueSample;
+QueueHandle_t queueText;
 SemaphoreHandle_t xSemaphore;
 
 // instances
 Avatar avatar;
 ChatGLM chatglm;
 AsyncWebServer server(80);
-WebSocketsClient webSocket;
+WebSocketsClient webSocketVWU;
+WebSocketsClient webSocketASR;
+WebSocketsClient webSocketTTS;
 AudioGeneratorMP3 *mp3;
 AudioFileSourceBuffer *buff = nullptr;
 static AudioOutputM5Speaker out(&M5.Speaker, m5spk_virtual_channel);
@@ -84,8 +97,14 @@ void speechInteractionTask(void * parameter);
 void movementTask(void * parameter);
 void randomBehaviorTask(void * parameter);
 
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
+void webSocketEventVWU(WStype_t type, uint8_t * payload, size_t length);
+void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length);
+void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length);
 void hexdump(const void *mem, uint32_t len, uint8_t cols = 16);
+
+void voiceTextTTS(char *text,char *tts_parms);
+
+void getServoAngle(int& angleYaw, int& anglePitch);
 
 // Initialization Routine
 void setup() {
@@ -94,11 +113,19 @@ void setup() {
 
   mp3 = new AudioGeneratorMP3();
 
+  queueSample = xQueueCreate( queueSampleSize, sizeof( int16_t ) );
+
   rec_data = (typeof(rec_data))heap_caps_malloc(record_size * sizeof(int16_t), MALLOC_CAP_8BIT);  // TTS录音数据
   memset(rec_data, 0 , record_size * sizeof(int16_t));
 
   // ESP_LOGI(TAG, "speech recognition start");
   // app_sr_start(false);
+
+  // websocket
+	webSocketVWU.begin("192.168.0.123", 81, "/");
+	webSocketVWU.onEvent(webSocketEventVWU);
+	//webSocket.setAuthorization("user", "Password"); // use HTTP Basic Authorization this is optional remove if not needed
+	webSocketVWU.setReconnectInterval(5000);
   
   // create task
   xTaskCreatePinnedToCore(displayTask, "DisplayTask",  10000,  NULL,  1, &DisplayTaskHandle, 1);
@@ -164,9 +191,14 @@ void sampleAudioTask(void * parameter) {
   while (true) {
     if (M5.Mic.isEnabled()) {
       if (!isTask3) {
-        // record 1 sample and send
-        recordOneSample();
-        xQueueSend(queueSample, &sample16, 10);
+        // record a sample and send to queue
+        int16_t sample16;
+        size_t bytes_read = 0;
+        if (i2s_read(micCfg.i2s_port, &sample16, sizeof(sample16), &bytes_read, portMAX_DELAY)){
+          xQueueSend(queueSample, &sample16, 10);
+        } else {
+          Serial.println("The microphone recording has encountered an exception. Audio sampling failed!");
+        }
       }
     }
   }
@@ -176,8 +208,9 @@ void sampleAudioTask(void * parameter) {
 void onlineWakeupTask(void * parameter) {
   while (true) {
     if (!isTask3) {
+      int16_t element;
       xQueueReceive(queueSample, &element, portMAX_DELAY);
-      webSocket.send(element);
+      webSocketVWU.sendTXT(reinterpret_cast<uint8_t*>(&element), sizeof(element));
     }
   }
   vTaskDelete(OnlineWakeupTaskHandle);
@@ -190,11 +223,22 @@ void speechInteractionTask(void * parameter) {
     isTask3 = true;
 
     // do something
+    startTime = ;
+    while (timeeplase < 3 || vadPass() & timeeplase < 5) {
+      record();
+      concat();
+      send2ASR();
+    }
+    vTaskDelay(pdMS_TO_TICKS(50)); // Wait until the final test is sent
 
-
-    // perform tts
-    VoiceText_tts();
-
+    // perform tts: 
+    String resultChatText;
+    processQueueTextData();
+    resultChatText = chatglmRequest(resultASRText);
+    if (!resultChatText.isEmpty()) {
+      voiceTextTTS(resultChatText);  // 仅发送请求不处理发声
+    }
+    
     isTask3 = false;
     xQueueReset(queueSample);
 
@@ -203,7 +247,11 @@ void speechInteractionTask(void * parameter) {
 }
 
 void movementTask(void * parameter) {
+  int yawAngle = 0;
+  int pitchAngle = 0;
   while (true) {
+    getServoAngle(yawAngle, pitchAngle);
+
 
   }
   vTaskDelete(MovementTaskHandle);
@@ -241,7 +289,7 @@ void lipSync(void *args)
   }
 }
 
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+void webSocketEventVWU(WStype_t type, uint8_t * payload, size_t length) {
 
 	switch(type) {
 		case WStype_DISCONNECTED:
@@ -251,18 +299,81 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
 
 			// send message to server when Connected
-			webSocket.sendTXT("Connected");
+			webSocketVWU.sendTXT("VWU Service Connected");
 			break;
 		case WStype_TEXT:
 			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
       // wake up and start reacting
-      if (strcmp((char*)payload, "xiaozhi") == 0) {
+      if (strcmp((char*)payload, KEY_WORD) == 0) {
+        USE_SERIAL.printf("Keyword Detected: %s\n", KEY_WORD);
 
         xTaskNotifyGive(&SpeechInteractionTaskHandle);
       }
 
 			// send message to server
 			// webSocket.sendTXT("message here");
+			break;
+		case WStype_BIN:
+			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			hexdump(payload, length);
+			break;
+		case WStype_ERROR:			
+		case WStype_FRAGMENT_TEXT_START:
+		case WStype_FRAGMENT_BIN_START:
+		case WStype_FRAGMENT:
+		case WStype_FRAGMENT_FIN:
+			break;
+	}
+}
+
+void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length) {
+
+	switch(type) {
+		case WStype_DISCONNECTED:
+			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			break;
+		case WStype_CONNECTED:
+			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+			break;
+		case WStype_TEXT:
+			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+      // send the speech recognition result to the queue
+      if (strcmp((char*)payload, KEY_WORD) == 0) {
+        USE_SERIAL.printf("Detected: %s\n", KEY_WORD);
+
+        xTaskNotifyGive(&SpeechInteractionTaskHandle);
+      }
+			break;
+		case WStype_BIN:
+			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			hexdump(payload, length);
+			break;
+		case WStype_ERROR:			
+		case WStype_FRAGMENT_TEXT_START:
+		case WStype_FRAGMENT_BIN_START:
+		case WStype_FRAGMENT:
+		case WStype_FRAGMENT_FIN:
+			break;
+	}
+}
+
+void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length) {
+
+	switch(type) {
+		case WStype_DISCONNECTED:
+			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			break;
+		case WStype_CONNECTED:
+			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+			break;
+		case WStype_TEXT:
+			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+      // wake up and start reacting
+      if (strcmp((char*)payload, KEY_WORD) == 0) {
+        USE_SERIAL.printf("Detected: %s\n", KEY_WORD);
+
+        xTaskNotifyGive(&SpeechInteractionTaskHandle);
+      }
 			break;
 		case WStype_BIN:
 			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
@@ -293,8 +404,34 @@ void hexdump(const void *mem, uint32_t len, uint8_t cols = 16) {
 	USE_SERIAL.printf("\n");
 }
 
-void VoiceText_tts(char *text,char *tts_parms) {
+void voiceTextTTS(char *text,char *tts_parms) {
+    //修改为tts源
     file = new AudioFileSourceVoiceTextStream( text, tts_parms);
     buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
     mp3->begin(buff, &out);
+}
+
+void getExpectedServoAngle(int& angleYaw, int& anglePitch) {
+
+}
+
+void processQueueTextData()
+{
+    BaseType_t received;
+
+    //while (1)
+    while (uxQueueMessagesWaiting(queueText) > 0)
+    {
+        received = xQueueReceive(queueText, subText, pdMS_TO_TICKS(1000));
+
+        if (received == pdTRUE) {
+            // 拼接字符串
+            strcat(resultASRText, subText);
+        } else {
+            // 超时或队列为空，跳出循环
+            break;
+        }
+    }
+
+    printf("Concatenated text: %s\n", resultASRText);
 }
