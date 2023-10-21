@@ -7,6 +7,7 @@
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 #include <WiFiMulti.h>
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <WebSocketsClient.h>
 #include <SPIFFS.h>
@@ -35,8 +36,11 @@ using namespace m5avatar;
 #define ARDUINO_M5STACK_Core2
 #define USE_SERIAL Serial1
 
+#define BLOCK_SIZE        32         // 每次读取的采样数（帧数）
+#define BLOCK_NUMS        (16000*6/BLOCK_SIZE)  // 总共需要读取的次数
+
 // constants
-const int MAX_TOKEN = 10;
+const int MAX_MESSAGES = 10;
 const int preallocateBufferSize = 50*1024;
 const char KEY_WORD[] = "xiaozhi";
 // set M5Speaker virtual channel (0-7)
@@ -44,12 +48,16 @@ static constexpr uint8_t m5spk_virtual_channel = 0;
 static constexpr const size_t recordSampleRate = 16000;
 static constexpr const size_t record_size = recordSampleRate * 5;  // 16000() * 16/2(Bytes) *5(s) = 160(KB)
 
+const String openApiUrl = "http://192.168.0.115:8000/v1/chat/completions";
+
 const int queueSampleSize = recordSampleRate * 2;
 
 // variables
 static int16_t *rec_data;
 char subText[100] = "";
 char resultASRText[500] = "";  // 存储ASR结果字符串，最大长度为 500
+DynamicJsonDocument chatBufferDoc(1024*6);
+JsonArray messages = chatBufferDoc.createNestedArray("messages");
 
 std::deque<String> tokenHistory;
 uint8_t *preallocateBuffer;
@@ -72,7 +80,8 @@ SemaphoreHandle_t xSemaphore;
 
 // instances
 Avatar avatar;
-ChatGLM chatglm;
+//ChatGLM chatglm;
+HTTPClient http;
 AsyncWebServer server(80);
 WebSocketsClient webSocketVWU;
 WebSocketsClient webSocketASR;
@@ -102,6 +111,7 @@ void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length);
 void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length);
 void hexdump(const void *mem, uint32_t len, uint8_t cols = 16);
 
+String chatglmRequest(char* asrText);
 void voiceTextTTS(char *text,char *tts_parms);
 
 void getServoAngle(int& angleYaw, int& anglePitch);
@@ -110,6 +120,7 @@ void getServoAngle(int& angleYaw, int& anglePitch);
 void setup() {
   setupM5Box();
   startWifi();
+  initChatGLMRequest();
 
   mp3 = new AudioGeneratorMP3();
 
@@ -122,10 +133,18 @@ void setup() {
   // app_sr_start(false);
 
   // websocket
-	webSocketVWU.begin("192.168.0.123", 81, "/");
+	webSocketVWU.begin("192.168.0.115", 8000, "/ws/1");
 	webSocketVWU.onEvent(webSocketEventVWU);
 	//webSocket.setAuthorization("user", "Password"); // use HTTP Basic Authorization this is optional remove if not needed
 	webSocketVWU.setReconnectInterval(5000);
+
+  webSocketASR.begin("wss://ws-api.xfyun.cn", 443, "/v2/iat");
+	webSocketASR.onEvent(webSocketEventASR);
+	webSocketASR.setReconnectInterval(5000);
+
+  webSocketTTS.begin("tts-api.xfyun.cn", 443, "/v2/tts");
+	webSocketTTS.onEvent(webSocketEventTTS);
+	webSocketTTS.setReconnectInterval(5000);
   
   // create task
   xTaskCreatePinnedToCore(displayTask, "DisplayTask",  10000,  NULL,  1, &DisplayTaskHandle, 1);
@@ -170,6 +189,11 @@ void setupM5Box() {
     M5.Speaker.config(spk_cfg);
     M5.Speaker.begin();
   }
+}
+
+void initChatGLMRequest() {
+  String initResponse = chatglmRequest("system", "/start");
+  Serial.println("Response of Init-ChatGLM-Request: " + initResponse);
 }
 
 static void audio_play_finish_cb(void)
@@ -223,25 +247,47 @@ void speechInteractionTask(void * parameter) {
     isTask3 = true;
 
     // do something
-    startTime = ;
-    while (timeeplase < 3 || vadPass() & timeeplase < 5) {
-      record();
-      concat();
-      send2ASR();
-    }
-    vTaskDelay(pdMS_TO_TICKS(50)); // Wait until the final test is sent
+    int16_t sample16;
+    size_t bytesRead = 0;
+    int16_t audioData[BLOCK_NUMS * BLOCK_SIZE];  // 存储音频数据的数组
+    int audioDataIndex = 0;                       // 当前音频数据的索引
+    uint16_t buffer[BLOCK_SIZE];
 
-    // perform tts: 
-    String resultChatText;
+    // unsigned long timeElapse = 0;
+    // unsigned long startTime = millis();
+
+    size_t cnt = 0;
+    while (cnt < BLOCK_NUMS/2 || (cnt < BLOCK_NUMS)) {  //vadPass() & 
+      if(i2s_read(micCfg.i2s_port, buffer, BLOCK_SIZE * sizeof(uint16_t), &bytesRead, portMAX_DELAY)) {
+        // 将读取的音频数据拷贝到全局数组中
+        memcpy(&audioData[audioDataIndex], buffer, bytesRead);
+        audioDataIndex += bytesRead / sizeof(int16_t);
+      } else {
+          Serial.println("The microphone recording has encountered an exception. Audio sampling failed!");
+      }
+
+      // timeElapse = millis() - startTime;
+      cnt += 1;
+    }
+    // 将音频数据转换为 Base64 格式
+    String pcmBase64Data = base64::encode((const uint8_t*)audioData, audioDataIndex * sizeof(int16_t) * 2);
+    webSocketASR.sendTXT(pcmBase64Data);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Wait for the text being sent
+
+    // perform tts
+    while(strcmp(resultASRText, "") == 0) {
+      break;
+    }
     processQueueTextData();
-    resultChatText = chatglmRequest(resultASRText);
+    memset(resultASRText, 0, sizeof(resultASRText));
+
+    String resultChatText = chatglmRequest(resultASRText);
     if (!resultChatText.isEmpty()) {
-      voiceTextTTS(resultChatText);  // 仅发送请求不处理发声
+      webSocketTTS.sendTXT(resultChatText);
     }
     
     isTask3 = false;
     xQueueReset(queueSample);
-
   }
   vTaskDelete(SpeechInteractionTaskHandle);
 }
@@ -404,11 +450,60 @@ void hexdump(const void *mem, uint32_t len, uint8_t cols = 16) {
 	USE_SERIAL.printf("\n");
 }
 
+void addMessage(char* role, const char* content) {
+  // 添加新消息
+  JsonObject message = messages.createNestedObject();
+  message["role"] = role;
+  message["content"] = content;
+
+  // 如果超过最大消息数量，删除第一个消息
+  while (messages.size() > MAX_MESSAGES) {
+    messages.remove(0);
+  }
+}
+
+String chatglmRequest(char* role, char* asrText) {
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(1000);
+
+  // 构建请求体和序列化
+  String requestBody;
+  addMessage(role, asrText);
+  serializeJson(chatBufferDoc, requestBody);
+
+  // 请求
+  http.begin(openApiUrl);
+  int httpResponseCode = http.POST(requestBody);
+
+  String reply;
+  if (httpResponseCode > 0) {
+    String responseBody = http.getString();
+    Serial.println(responseBody);
+    
+    // 解析响应
+    DynamicJsonDocument jsonResult(2048);
+    deserializeJson(jsonResult, responseBody);
+
+    reply = jsonResult["choices"][0]["message"]["content"].as<String>();
+    Serial.println(reply);
+  } else {
+    Serial.print("ChatGLM接口请求失败. Error code: ");
+    Serial.println(httpResponseCode);
+
+    reply = "";
+  }
+
+  // 释放资源
+  http.end();
+
+  return reply;
+}
+
 void voiceTextTTS(char *text,char *tts_parms) {
-    //修改为tts源
-    file = new AudioFileSourceVoiceTextStream( text, tts_parms);
-    buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
-    mp3->begin(buff, &out);
+  // 修改为tts源
+  file = new AudioFileSourceVoiceTextStream( text, tts_parms);
+  buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
+  mp3->begin(buff, &out);
 }
 
 void getExpectedServoAngle(int& angleYaw, int& anglePitch) {
@@ -425,11 +520,9 @@ void processQueueTextData()
         received = xQueueReceive(queueText, subText, pdMS_TO_TICKS(1000));
 
         if (received == pdTRUE) {
-            // 拼接字符串
             strcat(resultASRText, subText);
         } else {
-            // 超时或队列为空，跳出循环
-            break;
+            break;  // 超时或队列为空，跳出循环
         }
     }
 
