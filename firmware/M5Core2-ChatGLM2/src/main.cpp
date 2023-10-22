@@ -15,26 +15,27 @@
 #include <AudioOutput.h>
 #include <AudioFileSourceBuffer.h>
 #include <AudioGeneratorMP3.h>
+#include "AudioFileSourceTTSStream.h"
 
+#include "DataStream.h"
 #include <deque>
 #include <base64.h>
 #include <ArduinoJson.h>
+#include <Crypto.h>
 
-#include "ChatGLM.h"
 #include "tts_api.h"
 #include "AudioOutputM5Speaker.h"
-#include "app_sr.h"
 
 #include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "projectSecrets.h"
+
 using namespace m5avatar;
 
 #define WIFI_SSID "LeeSophia"
-#define WIFI_PASS "xxxxxx"
 #define ARDUINO_M5STACK_Core2
-#define USE_SERIAL Serial1
 
 #define BLOCK_SIZE        32         // 每次读取的采样数（帧数）
 #define BLOCK_NUMS        (16000*6/BLOCK_SIZE)  // 总共需要读取的次数
@@ -57,7 +58,7 @@ static int16_t *rec_data;
 char subText[100] = "";
 char resultASRText[500] = "";  // 存储ASR结果字符串，最大长度为 500
 DynamicJsonDocument chatBufferDoc(1024*6);
-JsonArray messages = chatBufferDoc.createNestedArray("messages");
+JsonArray messagesArray = chatBufferDoc.createNestedArray("messages");
 
 std::deque<String> tokenHistory;
 uint8_t *preallocateBuffer;
@@ -78,6 +79,8 @@ QueueHandle_t queueSample;
 QueueHandle_t queueText;
 SemaphoreHandle_t xSemaphore;
 
+DataStream voiceStreamBuffer;
+
 // instances
 Avatar avatar;
 //ChatGLM chatglm;
@@ -87,6 +90,7 @@ WebSocketsClient webSocketVWU;
 WebSocketsClient webSocketASR;
 WebSocketsClient webSocketTTS;
 AudioGeneratorMP3 *mp3;
+AudioFileSourceTTSStream *file = nullptr;
 AudioFileSourceBuffer *buff = nullptr;
 static AudioOutputM5Speaker out(&M5.Speaker, m5spk_virtual_channel);
 
@@ -99,6 +103,10 @@ TaskHandle_t MovementTaskHandle;
 TaskHandle_t RandomBehaviorTaskHandle;
 
 // Function Declaration
+void setupM5Box();
+void startWifi();
+void initChatGLMRequest();
+
 void displayTask(void * parameter);
 void sampleAudioTask(void * parameter);
 void onlineWakeupTask(void * parameter);
@@ -111,9 +119,11 @@ void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length);
 void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length);
 void hexdump(const void *mem, uint32_t len, uint8_t cols = 16);
 
-String chatglmRequest(char* asrText);
+String chatglmRequest(char* role, char* asrText);
+void processQueueTextData();
 void voiceTextTTS(char *text,char *tts_parms);
 
+void lipSync(void *args);
 void getServoAngle(int& angleYaw, int& anglePitch);
 
 // Initialization Routine
@@ -274,14 +284,14 @@ void speechInteractionTask(void * parameter) {
     webSocketASR.sendTXT(pcmBase64Data);
     vTaskDelay(pdMS_TO_TICKS(50)); // Wait for the text being sent
 
-    // perform tts
-    while(strcmp(resultASRText, "") == 0) {
-      break;
-    }
+    // 获取语音识别结果
+    while(strcmp(resultASRText, "") == 0) {}
+
     processQueueTextData();
     memset(resultASRText, 0, sizeof(resultASRText));
 
-    String resultChatText = chatglmRequest(resultASRText);
+    // 文本对话请求
+    String resultChatText = chatglmRequest("user", resultASRText);
     if (!resultChatText.isEmpty()) {
       webSocketTTS.sendTXT(resultChatText);
     }
@@ -297,8 +307,6 @@ void movementTask(void * parameter) {
   int pitchAngle = 0;
   while (true) {
     getServoAngle(yawAngle, pitchAngle);
-
-
   }
   vTaskDelete(MovementTaskHandle);
 }
@@ -335,23 +343,31 @@ void lipSync(void *args)
   }
 }
 
+void getServoAngle(int& angleYaw, int& anglePitch) {
+  
+}
+
+/**
+ * 发送数据——音频（单个）
+ * 接收数据——文本
+*/
 void webSocketEventVWU(WStype_t type, uint8_t * payload, size_t length) {
 
 	switch(type) {
 		case WStype_DISCONNECTED:
-			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			Serial.printf("[WSc] Disconnected!\n");
 			break;
 		case WStype_CONNECTED:
-			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+			Serial.printf("[WSc] Connected to url: %s\n", payload);
 
 			// send message to server when Connected
 			webSocketVWU.sendTXT("VWU Service Connected");
 			break;
 		case WStype_TEXT:
-			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+			Serial.printf("[WSc] get text: %s\n", payload);
       // wake up and start reacting
       if (strcmp((char*)payload, KEY_WORD) == 0) {
-        USE_SERIAL.printf("Keyword Detected: %s\n", KEY_WORD);
+        Serial.printf("Keyword Detected: %s\n", KEY_WORD);
 
         xTaskNotifyGive(&SpeechInteractionTaskHandle);
       }
@@ -360,7 +376,7 @@ void webSocketEventVWU(WStype_t type, uint8_t * payload, size_t length) {
 			// webSocket.sendTXT("message here");
 			break;
 		case WStype_BIN:
-			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			Serial.printf("[WSc] get binary length: %u\n", length);
 			hexdump(payload, length);
 			break;
 		case WStype_ERROR:			
@@ -372,26 +388,26 @@ void webSocketEventVWU(WStype_t type, uint8_t * payload, size_t length) {
 	}
 }
 
+/**
+ * 发送数据——音频（序列）
+ * 接收数据——文本
+*/
 void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length) {
 
 	switch(type) {
 		case WStype_DISCONNECTED:
-			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			Serial.printf("[WSc] Disconnected!\n");
 			break;
 		case WStype_CONNECTED:
-			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+			Serial.printf("[WSc] Connected to url: %s\n", payload);
 			break;
 		case WStype_TEXT:
-			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
+			Serial.printf("[WSc] get text: %s\n", payload);
       // send the speech recognition result to the queue
-      if (strcmp((char*)payload, KEY_WORD) == 0) {
-        USE_SERIAL.printf("Detected: %s\n", KEY_WORD);
-
-        xTaskNotifyGive(&SpeechInteractionTaskHandle);
-      }
+      xQueueSend(queueText, payload, 0);
 			break;
 		case WStype_BIN:
-			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			Serial.printf("[WSc] get binary length: %u\n", length);
 			hexdump(payload, length);
 			break;
 		case WStype_ERROR:			
@@ -403,26 +419,30 @@ void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length) {
 	}
 }
 
+/**
+ * 发送数据——文本（base64）
+ * 接收数据——音频（序列）
+*/
 void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length) {
 
 	switch(type) {
 		case WStype_DISCONNECTED:
-			USE_SERIAL.printf("[WSc] Disconnected!\n");
+			Serial.printf("[WSc] Disconnected!\n");
 			break;
 		case WStype_CONNECTED:
-			USE_SERIAL.printf("[WSc] Connected to url: %s\n", payload);
+			Serial.printf("[WSc] Connected to url: %s\n", payload);
 			break;
 		case WStype_TEXT:
-			USE_SERIAL.printf("[WSc] get text: %s\n", payload);
-      // wake up and start reacting
+			Serial.printf("[WSc] get text: %s\n", payload);
       if (strcmp((char*)payload, KEY_WORD) == 0) {
-        USE_SERIAL.printf("Detected: %s\n", KEY_WORD);
+        Serial.printf("Detected: %s\n", KEY_WORD);
 
-        xTaskNotifyGive(&SpeechInteractionTaskHandle);
+        // 将音频数据写入数据流
+        voiceStreamBuffer.writeData(payload, length);
       }
 			break;
 		case WStype_BIN:
-			USE_SERIAL.printf("[WSc] get binary length: %u\n", length);
+			Serial.printf("[WSc] get binary length: %u\n", length);
 			hexdump(payload, length);
 
 			// send data to server
@@ -437,28 +457,28 @@ void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length) {
 	}
 }
 
-void hexdump(const void *mem, uint32_t len, uint8_t cols = 16) {
+void hexdump(const void *mem, uint32_t len, uint8_t cols) {
 	const uint8_t* src = (const uint8_t*) mem;
-	USE_SERIAL.printf("\n[HEXDUMP] Address: 0x%08X len: 0x%X (%d)", (ptrdiff_t)src, len, len);
+	Serial.printf("\n[HEXDUMP] Address: 0x%08X len: 0x%X (%d)", (ptrdiff_t)src, len, len);
 	for(uint32_t i = 0; i < len; i++) {
 		if(i % cols == 0) {
-			USE_SERIAL.printf("\n[0x%08X] 0x%08X: ", (ptrdiff_t)src, i);
+			Serial.printf("\n[0x%08X] 0x%08X: ", (ptrdiff_t)src, i);
 		}
-		USE_SERIAL.printf("%02X ", *src);
+		Serial.printf("%02X ", *src);
 		src++;
 	}
-	USE_SERIAL.printf("\n");
+	Serial.printf("\n");
 }
 
 void addMessage(char* role, const char* content) {
   // 添加新消息
-  JsonObject message = messages.createNestedObject();
+  JsonObject message = messagesArray.createNestedObject();
   message["role"] = role;
   message["content"] = content;
 
   // 如果超过最大消息数量，删除第一个消息
-  while (messages.size() > MAX_MESSAGES) {
-    messages.remove(0);
+  while (messagesArray.size() > MAX_MESSAGES) {
+    messagesArray.remove(0);
   }
 }
 
@@ -499,9 +519,9 @@ String chatglmRequest(char* role, char* asrText) {
   return reply;
 }
 
-void voiceTextTTS(char *text,char *tts_parms) {
+void voiceTextTTS() {
   // 修改为tts源
-  file = new AudioFileSourceVoiceTextStream( text, tts_parms);
+  file = new AudioFileSourceTTSStream( &voiceStreamBuffer);
   buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
   mp3->begin(buff, &out);
 }
@@ -527,4 +547,48 @@ void processQueueTextData()
     }
 
     printf("Concatenated text: %s\n", resultASRText);
+}
+
+String createUrl() {
+  String url = "wss://tts-api.xfyun.cn/v2/tts";
+  String authorization_origin = "api_key=\"" + String(APIKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"";
+  String host = "ws-api.xfyun.cn";
+
+  // Get current timestamp in RFC1123 format
+  time_t now;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return "";
+  }
+  char date[50];
+  strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &timeinfo);
+
+  String signature_origin = "host: " + host + "\n";
+  signature_origin += "date: " + String(date) + "\n";
+  signature_origin += "GET /v2/tts HTTP/1.1";
+
+  // Calculate HMAC-SHA256
+  uint8_t hash[32];
+  char signature_sha[65];
+
+  SHA256 hasher;
+  SHA256HMAC hmac((uint8_t*)APIKey.c_str(), APIKey.length());
+  hasher.doUpdate(signature_origin.c_str(), signature_origin.length());
+  hasher.doFinal(hash);
+
+  // 字节数组hash转字符串
+  for (int i = 0; i < 32; ++i) {
+    sprintf(signature_sha + 2 * i, "%02x", hash[i]);
+  }
+
+  authorization_origin += signature_sha;
+  String authorization = base64::encode(authorization_origin);
+
+  // Construct the URL with authentication parameters
+  url += "?authorization=" + authorization;
+  url += "&date=" + String(date);
+  url += "&host=" + host;
+
+  return url;
 }
