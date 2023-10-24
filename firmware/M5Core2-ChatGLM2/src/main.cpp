@@ -19,7 +19,8 @@
 
 #include "DataStream.h"
 #include <deque>
-#include <base64.h>
+//#include <base64.h>
+#include <Base64.h>
 #include <ArduinoJson.h>
 #include <Crypto.h>
 
@@ -68,9 +69,6 @@ bool isTask3 = false;
 bool isReacting = false;
 bool isRandomBehaving = false;
 unsigned long lastInterfacingTime;
-
-struct timeval currentTime;
-struct timeval previousTime;
 
 m5::mic_config_t micCfg;
 
@@ -148,11 +146,11 @@ void setup() {
 	//webSocket.setAuthorization("user", "Password"); // use HTTP Basic Authorization this is optional remove if not needed
 	webSocketVWU.setReconnectInterval(5000);
 
-  webSocketASR.begin("wss://ws-api.xfyun.cn", 443, "/v2/iat");
+  webSocketASR.begin("wss://ws-api.xfyun.cn", 443, createUrl(false));
 	webSocketASR.onEvent(webSocketEventASR);
 	webSocketASR.setReconnectInterval(5000);
 
-  webSocketTTS.begin("tts-api.xfyun.cn", 443, "/v2/tts");
+  webSocketTTS.begin("tts-api.xfyun.cn", 443, createUrl(true));
 	webSocketTTS.onEvent(webSocketEventTTS);
 	webSocketTTS.setReconnectInterval(5000);
   
@@ -160,10 +158,10 @@ void setup() {
   xTaskCreatePinnedToCore(displayTask, "DisplayTask",  10000,  NULL,  1, &DisplayTaskHandle, 1);
   xTaskCreatePinnedToCore(sampleAudioTask, "SampleAudioTask",  10000,  NULL,  1, &SampleAudioTaskHandle, 1);
   xTaskCreatePinnedToCore(onlineWakeupTask, "OnlineWakeupTask",  4000,  NULL,  1, &OnlineWakeupTaskHandle, 1);
-  xTaskCreatePinnedToCore(speechInteractionTask, "SpeechInteractionTask",  4000,  NULL,  1, &SpeechInteractionTaskHandle, 1);
-  xTaskCreatePinnedToCore(movementTask, "MovementTask",  4000,  NULL,  1, &MovementTaskHandle, 1);
-  xTaskCreatePinnedToCore(randomBehaviorTask, "RandomBehaviorTask",  4000,  NULL,  1, &RandomBehaviorTaskHandle, 1);
-  avatar.addTask(lipSync, "lipSync");
+  //xTaskCreatePinnedToCore(speechInteractionTask, "SpeechInteractionTask",  4000,  NULL,  1, &SpeechInteractionTaskHandle, 1);
+  //xTaskCreatePinnedToCore(movementTask, "MovementTask",  4000,  NULL,  1, &MovementTaskHandle, 1);
+  //xTaskCreatePinnedToCore(randomBehaviorTask, "RandomBehaviorTask",  4000,  NULL,  1, &RandomBehaviorTaskHandle, 1);
+  //avatar.addTask(lipSync, "lipSync");
 
   Serial.println("Finish Setuped.");
 }
@@ -216,7 +214,8 @@ static void audio_play_finish_cb(void)
 
 void displayTask(void * parameter) {
   while (true) {
-    
+    Serial.println("In displayTask...");
+    sleep(5);
   }
   vTaskDelete(DisplayTaskHandle);
 }
@@ -280,7 +279,11 @@ void speechInteractionTask(void * parameter) {
       cnt += 1;
     }
     // 将音频数据转换为 Base64 格式
-    String pcmBase64Data = base64::encode((const uint8_t*)audioData, audioDataIndex * sizeof(int16_t) * 2);
+    // String pcmBase64Data = base64::encode((const uint8_t*)audioData, audioDataIndex * sizeof(int16_t) * 2);
+    int inputLen = sizeof(audioDataIndex * sizeof(int16_t) * 2);
+    int encodedLen = base64_enc_len(inputLen);
+    char pcmBase64Data[encodedLen];
+    base64_encode(pcmBase64Data, (char*) audioData, inputLen); 
     webSocketASR.sendTXT(pcmBase64Data);
     vTaskDelay(pdMS_TO_TICKS(50)); // Wait for the text being sent
 
@@ -344,7 +347,7 @@ void lipSync(void *args)
 }
 
 void getServoAngle(int& angleYaw, int& anglePitch) {
-  
+
 }
 
 /**
@@ -403,8 +406,10 @@ void webSocketEventASR(WStype_t type, uint8_t * payload, size_t length) {
 			break;
 		case WStype_TEXT:
 			Serial.printf("[WSc] get text: %s\n", payload);
+
+      String* resultText = new String(parseASRResponse(payload));
       // send the speech recognition result to the queue
-      xQueueSend(queueText, payload, 0);
+      xQueueSend(queueText, resultText, 0);
 			break;
 		case WStype_BIN:
 			Serial.printf("[WSc] get binary length: %u\n", length);
@@ -434,12 +439,8 @@ void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length) {
 			break;
 		case WStype_TEXT:
 			Serial.printf("[WSc] get text: %s\n", payload);
-      if (strcmp((char*)payload, KEY_WORD) == 0) {
-        Serial.printf("Detected: %s\n", KEY_WORD);
-
-        // 将音频数据写入数据流
-        voiceStreamBuffer.writeData(payload, length);
-      }
+      // 将音频数据写入数据流
+      decodeAndWriteAudioToBuffer(payload, length);
 			break;
 		case WStype_BIN:
 			Serial.printf("[WSc] get binary length: %u\n", length);
@@ -455,6 +456,10 @@ void webSocketEventTTS(WStype_t type, uint8_t * payload, size_t length) {
 		case WStype_FRAGMENT_FIN:
 			break;
 	}
+}
+
+String parseASRResponse(uint8_t * payload) {
+  return String("临时");
 }
 
 void hexdump(const void *mem, uint32_t len, uint8_t cols) {
@@ -521,7 +526,7 @@ String chatglmRequest(char* role, char* asrText) {
 
 void voiceTextTTS() {
   // 修改为tts源
-  file = new AudioFileSourceTTSStream( &voiceStreamBuffer);
+  file = new AudioFileSourceTTSStream(&voiceStreamBuffer);
   buff = new AudioFileSourceBuffer(file, preallocateBuffer, preallocateBufferSize);
   mp3->begin(buff, &out);
 }
@@ -541,6 +546,7 @@ void processQueueTextData()
 
         if (received == pdTRUE) {
             strcat(resultASRText, subText);
+            memset(subText, 0, sizeof(subText));
         } else {
             break;  // 超时或队列为空，跳出循环
         }
@@ -549,8 +555,8 @@ void processQueueTextData()
     printf("Concatenated text: %s\n", resultASRText);
 }
 
-String createUrl() {
-  String url = "wss://tts-api.xfyun.cn/v2/tts";
+String createUrl(bool TTS = true) {
+  String url = TTS ? "/v2/tts" : "/v2/iat";
   String authorization_origin = "api_key=\"" + String(APIKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"";
   String host = "ws-api.xfyun.cn";
 
@@ -566,7 +572,7 @@ String createUrl() {
 
   String signature_origin = "host: " + host + "\n";
   signature_origin += "date: " + String(date) + "\n";
-  signature_origin += "GET /v2/tts HTTP/1.1";
+  signature_origin += "GET " + url + " HTTP/1.1";
 
   // Calculate HMAC-SHA256
   uint8_t hash[32];
@@ -583,7 +589,12 @@ String createUrl() {
   }
 
   authorization_origin += signature_sha;
-  String authorization = base64::encode(authorization_origin);
+
+  int inputLen = sizeof(authorization_origin);
+  int encodedLen = base64_enc_len(inputLen);
+  char encoded[encodedLen];
+  base64_encode(encoded, (char*) authorization_origin.c_str(), inputLen);
+  String authorization = String(encoded);
 
   // Construct the URL with authentication parameters
   url += "?authorization=" + authorization;
@@ -591,4 +602,14 @@ String createUrl() {
   url += "&host=" + host;
 
   return url;
+}
+
+void decodeAndWriteAudioToBuffer(uint8_t *payload, size_t length) {
+  int input2Len = sizeof(payload);
+      int decodedLen = base64_dec_len((char*) payload, input2Len);
+      char decoded[decodedLen];
+      base64_decode(decoded, (char*) payload, input2Len);
+
+      // 将音频数据写入数据流
+      voiceStreamBuffer.writeData((uint8_t *) decoded, length);
 }

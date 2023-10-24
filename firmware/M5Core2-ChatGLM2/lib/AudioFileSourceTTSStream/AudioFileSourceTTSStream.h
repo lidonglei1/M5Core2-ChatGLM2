@@ -22,7 +22,6 @@ class AudioFileSourceTTSStream : public AudioFileSource {
         virtual bool isOpen() override;
         virtual uint32_t getSize() override;
         virtual uint32_t getPos() override;
-        bool SetReconnect(int tries, int delayms) { reconnectTries = tries; reconnectDelayMs = delayms; return true; }
 
     private:
         DataStream *dataBuffer;
@@ -30,7 +29,4 @@ class AudioFileSourceTTSStream : public AudioFileSource {
         virtual uint32_t readInternal(void *data, uint32_t len, bool nonBlock);
         int pos;
         int size;
-        int reconnectTries;
-        int reconnectDelayMs;
-        char saveURL[128];
 };
